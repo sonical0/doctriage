@@ -1,0 +1,28 @@
+Réunion hebdo équipe produit — lundi 19 mai 2026
+Présents : Sofia (PO), Karim (lead dev), Lucie (design), Antoine (QA), moi (PM)
+Durée : 1h15 (dépassement prévu 15min)
+
+démarrage en retard, Karim pas là pendant les 10 premières minutes
+
+SPRINT REVIEW S21
+
+Karim a présenté les 4 user stories terminées. La feature de recherche avancée est live, ça marche bien d'après les premiers retours utilisateurs. Par contre la story sur les notifications push n'est pas terminée, elle passe sur S22. Sofia pas contente, c'était censé être livré ce sprint. À noter pour la vélocité.
+
+Lucie a montré les maquettes v2 du tableau de bord. Tout le monde a aimé le nouveau layout. Antoine a relevé 2 points d'accessibilité à corriger avant validation.
+
+POINTS D'ACTION identifiés pendant la réunion :
+- Karim : finir les notifications push avant mercredi soir (bloque la démo client jeudi)
+- Lucie : corriger les 2 points accessibilité tableau de bord, envoyer à Antoine pour revalidation
+- Antoine : préparer les cas de test pour la démo client du jeudi 22 mai
+- Sofia : rédiger les specs de la story "export Excel" pour le backlog S23
+- moi : envoyer le compte-rendu à toute l'équipe + Directeur produit
+- moi : réserver la salle de démo pour jeudi 14h
+
+RISQUES
+
+Le départ de Paul (développeur backend) le 1er juin va créer un creux. On n'a toujours pas de profil de remplacement. Sofia pense qu'on peut tenir 3 semaines max avant que ça bloque. À remonter en CODIR.
+
+DIVERS
+
+On a changé l'heure du standup : 9h30 au lieu de 9h00 à partir de la semaine prochaine.
+Prochain hebdo : lundi 26 mai, même salle.

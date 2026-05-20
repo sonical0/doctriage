@@ -1,0 +1,42 @@
+TICKET INCIDENT — Plateforme analytique interne
+Rapporté par : Thomas Renard (t.renard@acme.fr)
+Date : 2026-05-19 09:14:22
+Environnement : Production
+Version applicative : 4.2.1
+
+DESCRIPTION DU PROBLÈME
+
+Depuis ce matin, le module d'export des rapports PDF génère des fichiers corrompus pour tous les rapports contenant des graphiques dynamiques. Les rapports texte seuls ne semblent pas affectés.
+
+COMPORTEMENT OBSERVÉ
+
+- L'utilisateur déclenche un export PDF depuis l'interface
+- La barre de progression atteint 100%
+- Le fichier téléchargé fait 0 octets ou est illisible par Adobe Reader
+- Erreur Adobe : "Le fichier est endommagé et ne peut pas être réparé"
+
+LOGS SERVEUR (extrait) :
+
+[ERROR] 2026-05-19 09:12:41 pdf-renderer - Chart rendering failed: TypeError: Cannot read properties of undefined (reading 'datasets')
+    at ChartRenderer.renderToBuffer (/app/services/pdf/chart-renderer.js:142:18)
+    at async PDFExportService.buildPage (/app/services/pdf/export.js:89:12)
+[ERROR] 2026-05-19 09:12:41 pdf-renderer - PDF assembly aborted, partial file discarded
+
+CONTEXTE
+
+Un déploiement a eu lieu hier soir à 23h00 (version 4.2.1 → patch correctif sur le module auth).
+Le problème est apparu dès 08h45 ce matin à la reprise des activités.
+Aucun changement côté infrastructure.
+
+IMPACT
+
+Bloquant pour l'équipe finance qui doit envoyer les rapports mensuels aux directeurs avant 12h00 aujourd'hui.
+Environ 15 utilisateurs concernés.
+
+ACTIONS DÉJÀ TENTÉES
+
+- Redémarrage du service pdf-renderer : sans effet
+- Test sur environnement de recette : problème reproduit
+- Rollback version 4.2.0 en cours de validation DevOps
+
+PRIORITÉ SUGGÉRÉE : Critique

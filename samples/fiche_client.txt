@@ -1,0 +1,41 @@
+FICHE PROSPECT — Créée le 15 mai 2026
+Source : Salon Innotech Paris 2026 / Stand B42
+Assignée à : Julien Marchand (commercial grands comptes)
+
+COORDONNÉES
+
+Société : Nexoria Solutions SAS
+Secteur : Conseil en transformation digitale
+Taille : 250-500 salariés
+Chiffre d'affaires estimé : 35M€
+
+Contact principal :
+  Nom : Claire Fontaine
+  Poste : Directrice des Opérations
+  Email : c.fontaine@nexoria.fr
+  Mobile : 07 45 23 11 89
+  LinkedIn : linkedin.com/in/clairefontaine-nexoria
+
+Contact secondaire :
+  Nom : Romain Leclercq
+  Poste : DSI
+  Email : r.leclercq@nexoria.fr
+
+CONTEXTE DE LA RENCONTRE
+
+Claire Fontaine s'est arrêtée au stand lors de la démo de notre module d'automatisation documentaire. Elle a montré un fort intérêt pour la gestion des contrats fournisseurs. Leur processus actuel est 100% manuel (scan + saisie) et génère beaucoup d'erreurs.
+
+BESOINS IDENTIFIÉS
+
+- Automatisation de la saisie des contrats fournisseurs (volume : ~200/mois)
+- Extraction automatique des clauses clés (durée, montant, pénalités)
+- Intégration avec leur ERP SAP S/4HANA
+- Budget évoqué : "autour de 80K€ pour une phase pilote"
+
+PROCHAINE ÉTAPE CONVENUE
+
+Démo approfondie avec l'équipe technique Nexoria
+Date souhaitée : semaine du 2 juin 2026
+Action : Julien doit envoyer une invitation avant vendredi 23 mai
+
+SCORE POTENTIEL : Chaud (8/10)
