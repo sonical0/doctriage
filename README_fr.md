@@ -2,96 +2,34 @@
 
 Read this documentation in English: [README.md](README.md)
 
-DocTriage est un agent en ligne de commande pour classer des documents, extraire des champs structurés, et journaliser chaque décision avec un score de confiance et une traçabilité complète.
+DocTriage est un agent en ligne de commande qui classe des documents, en extrait les champs utiles et propose une action, avec un score de confiance. **Tout tourne en local avec Ollama : aucune donnée ne quitte la machine.**
 
-Il accepte tout texte libre (emails support, tickets d'incident, comptes-rendus, demandes RH, fiches client) et renvoie un JSON structuré, accompagné d'une entrée de gouvernance append-only. Aucun traitement manuel n'est requis entre l'entrée et la sortie.
-
-Deux backends sont disponibles : **Claude API** (Anthropic) pour le cloud, et **Ollama** pour l'inférence locale. En mode local, aucune donnée ne sort de la machine.
+Il accepte tout texte libre (mails de support, tickets d'incident, comptes rendus, demandes RH, fiches client) et journalise chaque décision dans un fichier en ajout seul, sans y recopier le contenu des documents.
 
 ---
 
-## Sommaire (FR)
+## Ce qu'il garantit
 
-- [Valeur et cas d'usage](#valeur-et-cas-dusage)
-- [Architecture](#architecture)
-- [Schema de classification](#schema-de-classification)
-- [Exigences](#exigences)
-- [Installation](#installation)
-- [Utilisation](#utilisation)
-- [Exemples de sortie](#exemples-de-sortie)
-- [Gouvernance](#gouvernance)
-- [Structure du projet](#structure-du-projet)
-- [Idees d'extensions](#idees-dextensions)
+- **Sortie contrainte** : le modèle remplit un schéma JSON strict (sorties structurées d'Ollama). La décision est ensuite validée ; si elle enfreint une règle (confiance hors de 0–1, action vide…), elle est redemandée une fois avec la liste des écarts, puis refusée. Rien n'est inventé en repli.
+- **Confiance contrôlée** : la confiance retenue ne dépend pas que de ce que le modèle dit de lui-même. Chaque type a ses champs attendus ; s'il en manque, la confiance baisse (confiance du modèle × (0,5 + 0,5 × part des champs présents)). Une **relecture** facultative par un second passage peut aussi la diviser par deux en cas de désaccord.
+- **Journal sans données personnelles** : ni le texte, ni un extrait, ni les valeurs extraites (noms, adresses mail). Seuls restent l'empreinte SHA-256 du document, la décision, les confiances et les **noms** des champs.
+- **Idempotent et rejouable** : un document déjà journalisé n'est ni réanalysé ni compté deux fois. Un lot qui échoue en partie se relance tel quel : seuls les documents en échec sont retraités.
+- **Échecs explicites** : Ollama arrêté, modèle absent (avec la commande `ollama pull` à lancer), délai dépassé (une seule nouvelle tentative), réponse non conforme.
 
----
-
-## Valeur et cas d'usage
-
--- **Triage documentaire fiable** : classification en 6 types et extraction de champs métier adaptés.
--- **Actionnable** : action suggérée en français, niveau de priorité, score de confiance.
--- **Traçabilité** : chaque décision est journalisée en JSON, immuable et auditable.
--- **Local ou cloud** : Ollama pour la souveraineté des données, Claude pour la performance.
-
----
-
-## Architecture
-
-```
-Input (texte ou fichier)
-         |
-         v
-+------------------+
-|     main.py      |   CLI — parsing, sortie formatee
-+--------+---------+
-         |
-         +--- --backend anthropic -------------------+
-         |                                           |
-         v                                           v
-+--------------------+                 +--------------------+
-|   Claude API       |                 |   Ollama (local)   |
-|   tool use forcé   |                 |   tool use ou      |
-|   prompt caching   |                 |   fallback JSON    |
-|   retry on error   |                 |   aucun appel externe |
-+--------+-----------+                 +--------+-----------+
-         +-------------------+---------+
-                             |
-                             v
-               classify_document tool result:
-               {
-                 document_type,
-                 priority,
-                 extracted_fields,
-                 suggested_action,
-                 confidence_score
-               }
-                             |
-                             v
-               +---------------------+
-               |   governance.py     |   append JSON entry to
-               |                     |   reports/governance.log
-               +---------------------+
-                             |
-                             v
-               JSON final + entree de gouvernance
-```
-
----
-
-## Schéma de classification
+## Schéma
 
 - **Types** : `support`, `bug_report`, `meeting_notes`, `hr_request`, `client_request`, `other`
 - **Priorités** : `low`, `medium`, `high`, `urgent`
-- **Confiance** : score de 0.0 à 1.0
-- **Champs extraits** : adaptés au type de document
+- **Champs attendus** :
 
----
-
-## Exigences
-
-- Python 3.11+
-- Une clé API Anthropic (backend cloud) ou Ollama en local
-
----
+| Type | Champs |
+| --- | --- |
+| support | client, objet, demande |
+| bug_report | environnement, version, symptome, impact |
+| meeting_notes | participants, decisions, actions |
+| hr_request | demandeur, type_demande, dates |
+| client_request | entreprise, contact, besoin |
+| other | aucun imposé |
 
 ## Installation
 
@@ -99,174 +37,73 @@ Input (texte ou fichier)
 git clone https://github.com/sonical0/doctriage.git
 cd doctriage
 pip install -r requirements.txt
-cp .env.example .env
+ollama pull qwen3:8b          # modèle par défaut
 ```
 
-Configuration `.env` :
-
-```
-ANTHROPIC_API_KEY=sk-ant-...
-
-# Optionnel — uniquement pour Ollama
-OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2
-```
-
-Backends et valeurs par défaut :
-
-- **Anthropic** : modèle par défaut `claude-haiku-4-5-20251001`
-- **Ollama** : modèle par défaut `llama3.2` et URL `http://localhost:11434`
-
----
+Facultatif, dans un fichier `.env` (voir `.env.example`) : `OLLAMA_URL` (défaut `http://localhost:11434`), `OLLAMA_MODEL` (défaut `qwen3:8b`), `OLLAMA_TIMEOUT` en secondes (défaut 180).
 
 ## Utilisation
 
-### Analyser un fichier
-
 ```bash
-python main.py --input samples/email_support.txt
-python main.py --input samples/ticket_bug.txt
-```
-
-### Analyser du texte brut
-
-```bash
+python main.py --input samples/ticket_bug.txt          # un fichier
 python main.py --input "Mon abonnement n'est pas renouvelé depuis ce mois-ci."
+python main.py --lot samples --relecture               # un dossier, avec relecture
+python main.py --input samples/note_reunion.txt --model mistral-nemo --json
+python main.py --summary                               # bilan du journal
 ```
 
-### Afficher le résumé de gouvernance
+`--force` réanalyse un document déjà journalisé ; `--relecture-modele` choisit un autre modèle pour la relecture.
 
-```bash
-python main.py --summary
-```
-
-### Utiliser le backend local (Ollama)
-
-```bash
-python main.py --input samples/email_support.txt --backend ollama
-python main.py --input samples/ticket_bug.txt --backend ollama --ollama-model qwen3:14b
-python main.py --input samples/note_reunion.txt --backend ollama --ollama-model dolphin-llama3:8b
-```
-
-Modèles Ollama avec tool use natif (meilleure précision structurelle) : `llama3.1`, `llama3.2`, `qwen2.5`, `qwen3`, `mistral-nemo`.
-
-Modèles sans tool use natif (ex. : `dolphin-llama3`) : fallback automatique vers un prompt JSON contraint.
-
-| Capacité | Modèles (exemples) | Comportement |
-| --- | --- | --- |
-| Tool use natif | `llama3.1`, `llama3.2`, `qwen2.5`, `qwen3`, `mistral-nemo` | Tool use via `/v1/chat/completions` |
-| Sans tool use | `dolphin-llama3` | Fallback vers prompt JSON contraint |
-
----
-
-## Exemples de sortie
-
-### Email support — plainte de facturation
+## Exemple de sortie (réelle, qwen3:8b)
 
 ```
-[DocTriage] Decision #4  [backend: ollama / dolphin-llama3:8b]
---------------------------------------------------------
-  Type              support
-  Priorité          urgent
-  Confiance         90%
-  Action suggérée   Vérifier les transactions du compte bancaire de la cliente
-                    pour identifier la cause du double prélèvement. Procéder
-                    au remboursement de la somme prélevée en trop (89,90 EUR)
-                    dans les plus brefs délais et confirmer par email.
-
-  Champs extraits :
-    from_email: marie.dupont@gmail.com
-    to_email: support@monservice.fr
-    subject: Problème de facturation urgent - double prélèvement
-    customer_id: 2024-FR-00847
-
-  Tokens : 862
-  Log enregistré : reports/governance.log (entrée #4)
-```
-
-### Bug report — incident en production
-
-```
-[DocTriage] Decision #6  [backend: ollama / qwen3:14b]
+[DocTriage] Decision #5  [local / qwen3:8b]
 --------------------------------------------------------
   Type              bug_report
-  Priorité          urgent
-  Confiance         98%
-  Action suggérée   Prioriser la correction du bug d'export PDF (urgence critique)
-                    et accélérer le rollback vers la version 4.2.0
+  Priorite          high
+  Confiance         95% (modele : 95%)
+  Action suggeree   Rollback à la version 4.2.0 et investigation des logs pour identifier
+                    la cause du TypeError dans le module de rendu des graphiques.
+  Relecture         accord (Le type de document, la priorité et les champs extraits
+                    correspondent fidèlement au texte du document.)
 
-  Champs extraits :
-    reported_by: Thomas Renard (t.renard@acme.fr)
-    environment: Production
-    version: 4.2.1
-    error_description: Export PDF généré des fichiers corrompus avec graphiques dynamiques
-    logs: [ERROR] pdf-renderer - Chart rendering failed: TypeError: ...
-    context: Déploiement version 4.2.1 hier soir (patch auth), problème apparu à 08h45
-    impact: Bloquant pour l'équipe finance (15 utilisateurs, deadline 12h00)
-    actions_taken: Redémarrage service pdf-renderer, test en recette, rollback 4.2.0 en cours
-
-  Tokens : 1511
-  Log enregistré : reports/governance.log (entrée #6)
+  Tokens : 1030 · 4.0 s
+  Log enregistre : reports/governance.log (entree #5)
 ```
 
-### Resume de gouvernance
+## Journal de gouvernance
 
-```
-Rapport de gouvernance — 6 décision(s)
-Confiance moyenne  : 95%
-Répartition par type :
-  bug_report         ### (3)
-  support            ### (3)
-```
-
----
-
-## Gouvernance
-
-Chaque décision est ajoutée dans `reports/governance.log` sous forme d'une ligne JSON. Le fichier est lisible et machine-parseable : un objet JSON par ligne, append-only, jamais modifié.
+`reports/governance.log`, une ligne JSON par décision :
 
 ```json
-{
-  "id": 6,
-  "timestamp": "2026-05-19T22:35:10.123456+02:00",
-  "input_preview": "TICKET INCIDENT - Plateforme analytique interne\nRapporté par : Thomas Renard...",
-  "decision": {
-    "document_type": "bug_report",
-    "priority": "urgent",
-    "extracted_fields": {
-      "environment": "Production",
-      "version": "4.2.1",
-      "impact": "Bloquant pour l'équipe finance (15 utilisateurs, deadline 12h00)"
-    },
-    "suggested_action": "Prioriser la correction du bug d'export PDF et accélérer le rollback vers la version 4.2.0",
-    "confidence_score": 0.98
-  },
-  "model": "qwen3:14b",
-  "tokens_used": 1511
-}
+{"version": 2, "id": 5, "horodatage": "2026-11-18T21:05:57+00:00",
+ "empreinte": "37af59c943b67e47240976c3de8dfc8534f7ddd4223f16f72fe00bf7aab5b8f1",
+ "longueur": 1655, "reprise": false, "modele": "qwen3:8b",
+ "type": "bug_report", "priorite": "high", "confiance_modele": 0.95, "confiance": 0.95,
+ "champs": ["environnement", "impact", "symptome", "version"], "champs_manquants": [],
+ "relecture": {"verdict": "accord", "modele": "qwen3:8b"}, "redemandes": 0,
+ "tokens": 1852, "duree_ms": 4029}
 ```
 
-Chaque entrée enregistre un identifiant, un timestamp en UTC, un aperçu des 100 premiers caractères, le résultat structuré, le modèle, et le nombre de tokens. La commande `python main.py --summary` produit un résumé agrégé.
+Les échecs d'un lot vont dans `reports/echecs.jsonl` (source, empreinte, erreur), sans le texte. `--summary` lit aussi les entrées de l'ancien format.
 
----
+## Tests
 
-## Structure du projet
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Ollama est simulé : les tests ne font aucun appel réseau. Ils tournent à chaque push et à chaque pull request (GitHub Actions).
+
+## Structure
 
 ```
 doctriage/
-  main.py           Interface CLI
-  agent.py          Inference (Anthropic + Ollama), tool use, fallback JSON
-  governance.py     Journalisation et statistiques
+  main.py           Interface en ligne de commande (fichier, texte, lot, bilan)
+  agent.py          Appels Ollama, garde-fous, relecture
+  schema.py         Schéma strict, validation, contrôles
+  governance.py     Journal idempotent sans données personnelles
   samples/          5 documents d'exemple (FR)
-  reports/          Logs de gouvernance (hors VCS)
-  requirements.txt
-  .env.example
+  tests/            Tests sans réseau
 ```
-
----
-
-## Idées d'extensions
-
-1. **Web interface** — exposer la classification via FastAPI avec upload de fichier
-2. **Multi-agent routing** — router les décisions vers la bonne équipe
-3. **IMAP connector** — classifier les emails entrants et appliquer des labels

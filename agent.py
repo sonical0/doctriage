@@ -1,212 +1,164 @@
+"""Inférence locale avec Ollama : aucune donnée ne quitte la machine.
+
+Garde-fous (repris de ce qui a tenu en production sur d'autres projets) :
+- sortie contrainte par le schéma JSON de schema.py (sorties structurées d'Ollama) ;
+- délai par appel, une seule nouvelle tentative sur erreur serveur ou délai dépassé ;
+- décision validée ; si elle enfreint une règle, une seule redemande avec la liste des écarts ;
+- aucun repli silencieux : un échec lève une erreur explicite, rien n'est inventé ;
+- modèle absent détecté avant l'appel, avec la commande pour l'installer.
+"""
+
 import json
 import os
-import re
+import time
 
-import anthropic
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
+import schema
 
-DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
-DEFAULT_OLLAMA_MODEL = "llama3.2"
-DEFAULT_OLLAMA_URL = "http://localhost:11434"
+try:  # variables OLLAMA_* depuis un fichier local facultatif
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-SYSTEM_PROMPT = """You are a document classification and information extraction agent.
-Your task is to analyze any document written in French or English and call the classify_document tool
-with accurate, structured information extracted from the text.
+DEFAULT_MODEL = "qwen3:8b"
+DEFAULT_URL = "http://localhost:11434"
+DELAI_S = float(os.environ.get("OLLAMA_TIMEOUT", "180"))
+REDEMANDES_MAX = 1
 
-Classification guidelines:
-- support: customer complaints, billing issues, subscription problems
-- bug_report: technical errors, application failures, incident reports
-- meeting_notes: meeting summaries, action items, team discussions
-- hr_request: leave requests, HR-related documents
-- client_request: prospect files, sales opportunities, client inquiries
-- other: anything that does not fit the above categories
+SYSTEM_PROMPT = f"""Tu es un agent de triage documentaire. Tu lis un document en français ou en anglais et tu
+remplis le schéma demandé, sans rien inventer.
 
-Always extract the most relevant fields for the document type and provide a realistic confidence score."""
+Types :
+- support : réclamation client, facturation, abonnement
+- bug_report : erreur technique, panne, incident
+- meeting_notes : compte rendu, décisions, actions d'une réunion
+- hr_request : congés, demande RH
+- client_request : prospect, opportunité commerciale, demande d'un client
+- other : tout le reste
 
-CLASSIFY_TOOL = {
-    "name": "classify_document",
-    "description": "Classifies a document and extracts structured information from it.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "document_type": {
-                "type": "string",
-                "enum": ["support", "bug_report", "meeting_notes", "hr_request", "client_request", "other"],
-                "description": "The category of the document.",
-            },
-            "priority": {
-                "type": "string",
-                "enum": ["low", "medium", "high", "urgent"],
-                "description": "The urgency level of the document.",
-            },
-            "extracted_fields": {
-                "type": "object",
-                "description": "Key fields extracted from the document, adapted to its type.",
-            },
-            "suggested_action": {
-                "type": "string",
-                "description": "Recommended action in French, specific and actionable.",
-            },
-            "confidence_score": {
-                "type": "number",
-                "minimum": 0.0,
-                "maximum": 1.0,
-                "description": "Confidence in the classification, between 0.0 and 1.0.",
-            },
-        },
-        "required": ["document_type", "priority", "extracted_fields", "suggested_action", "confidence_score"],
-    },
-}
+Champs à extraire, sous ces noms exacts quand l'information figure dans le document (ajoute d'autres
+champs utiles si besoin, et omets un champ absent plutôt que de l'inventer) :
+{schema.consignes_champs()}
 
-# Format OpenAI-compatible (pour Ollama)
-_CLASSIFY_TOOL_OPENAI = {
-    "type": "function",
-    "function": {
-        "name": CLASSIFY_TOOL["name"],
-        "description": CLASSIFY_TOOL["description"],
-        "parameters": CLASSIFY_TOOL["input_schema"],
-    },
+suggested_action : une action précise en français. confidence_score : ta confiance entre 0 et 1."""
+
+PROMPT_RELECTURE = """Tu relis la décision d'un autre agent de triage. Compare-la au document : le type et la
+priorité sont-ils justes, les champs extraits fidèles au texte (rien d'inventé) ? Réponds « accord » ou
+« desaccord », avec un motif court en français."""
+
+SCHEMA_RELECTURE = {
+    "type": "object",
+    "properties": {"verdict": {"type": "string", "enum": ["accord", "desaccord"]}, "motif": {"type": "string"}},
+    "required": ["verdict", "motif"],
+    "additionalProperties": False,
 }
 
 
-def _classify_anthropic(text: str) -> dict:
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+class ErreurOllama(RuntimeError):
+    pass
 
-    def _call() -> anthropic.types.Message:
-        return client.messages.create(
-            model=DEFAULT_ANTHROPIC_MODEL,
-            max_tokens=1024,
-            system=[
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            tools=[CLASSIFY_TOOL],
-            tool_choice={"type": "tool", "name": "classify_document"},
-            messages=[{"role": "user", "content": text}],
-        )
 
+def _url(base: str, chemin: str) -> str:
+    return f"{base.rstrip('/')}{chemin}"
+
+
+def verifier_modele(model: str, base_url: str, session=requests) -> None:
+    """Échoue tôt, avec la commande à lancer, si Ollama ne répond pas ou n'a pas le modèle."""
     try:
-        response = _call()
-    except anthropic.APIError:
-        response = _call()
-
-    tool_block = next(b for b in response.content if b.type == "tool_use")
-    usage = response.usage
-
-    return {
-        "result": tool_block.input,
-        "model": response.model,
-        "tokens_used": usage.input_tokens + usage.output_tokens,
-    }
+        r = session.get(_url(base_url, "/api/tags"), timeout=10)
+        r.raise_for_status()
+    except requests.RequestException as exc:
+        raise ErreurOllama(f"Ollama injoignable sur {base_url} ({exc}). Lancer « ollama serve ».") from exc
+    noms = {m.get("name", "") for m in r.json().get("models", [])}
+    if model not in noms and f"{model}:latest" not in noms:
+        raise ErreurOllama(f"Modèle « {model} » absent d'Ollama. L'installer : ollama pull {model}")
 
 
-def _parse_json_fallback(content: str) -> dict:
-    """Extrait un objet JSON depuis une réponse texte (markdown ou brut)."""
-    # Retire les blocs ```json ... ```
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
-    if match:
-        return json.loads(match.group(1))
-    # Cherche le premier { ... } cohérent
-    match = re.search(r"\{.*\}", content, re.DOTALL)
-    if match:
-        return json.loads(match.group(0))
-    raise ValueError(f"Aucun JSON valide trouvé dans la réponse : {content[:200]}")
-
-
-_JSON_SCHEMA_PROMPT = """Respond with a single JSON object — no markdown, no commentary — using exactly these fields:
-{
-  "document_type": one of ["support", "bug_report", "meeting_notes", "hr_request", "client_request", "other"],
-  "priority": one of ["low", "medium", "high", "urgent"],
-  "extracted_fields": { key fields relevant to the document type },
-  "suggested_action": "recommended action in French, specific and actionable",
-  "confidence_score": float between 0.0 and 1.0
-}"""
-
-
-def _normalize_keys(d: dict) -> dict:
-    """Supprime les espaces parasites dans les clés JSON (artefacts de certains modèles)."""
-    return {k.replace(" ", ""): v for k, v in d.items()}
-
-
-def _classify_ollama_json(text: str, model: str, base_url: str) -> dict:
-    """Fallback pour les modèles sans support tool use : JSON contraint via /api/chat."""
-    url = f"{base_url.rstrip('/')}/api/chat"
+def _appel(messages: list, fmt: dict, model: str, base_url: str, session=requests, attendre=time.sleep) -> dict:
+    """Un appel /api/chat ; une seule nouvelle tentative sur erreur 5xx ou délai dépassé."""
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + _JSON_SCHEMA_PROMPT},
-            {"role": "user", "content": text},
-        ],
-        "format": "json",
+        "messages": messages,
+        "format": fmt,
         "stream": False,
+        "think": False,
+        "options": {"temperature": 0},
     }
-    resp = requests.post(url, json=payload, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-
-    result = _normalize_keys(json.loads(data["message"]["content"]))
-    tokens_used = data.get("prompt_eval_count", 0) + data.get("eval_count", 0)
-
-    return {
-        "result": result,
-        "model": model,
-        "tokens_used": tokens_used,
-    }
-
-
-def _classify_ollama(text: str, model: str, base_url: str) -> dict:
-    url = f"{base_url.rstrip('/')}/v1/chat/completions"
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text},
-        ],
-        "tools": [_CLASSIFY_TOOL_OPENAI],
-        "tool_choice": {"type": "function", "function": {"name": "classify_document"}},
-        "stream": False,
-    }
-
-    resp = requests.post(url, json=payload, timeout=60)
-
-    if resp.status_code == 400:
-        # Le modèle ne supporte pas le tool use → fallback JSON prompt
-        return _classify_ollama_json(text, model, base_url)
-
-    resp.raise_for_status()
-    data = resp.json()
-
-    message = data["choices"][0]["message"]
-    usage = data.get("usage", {})
-    tokens_used = usage.get("total_tokens", 0)
-
-    tool_calls = message.get("tool_calls")
-    if tool_calls:
-        result = json.loads(tool_calls[0]["function"]["arguments"])
-    else:
-        result = _parse_json_fallback(message.get("content", ""))
-
-    return {
-        "result": result,
-        "model": data.get("model", model),
-        "tokens_used": tokens_used,
-    }
+    for tentative in range(2):
+        debut = time.monotonic()
+        try:
+            r = session.post(_url(base_url, "/api/chat"), json=payload, timeout=DELAI_S)
+        except requests.Timeout as exc:
+            if tentative == 0:
+                continue
+            raise ErreurOllama(f"Délai dépassé ({DELAI_S:.0f} s) deux fois de suite") from exc
+        except requests.RequestException as exc:
+            raise ErreurOllama(f"Ollama injoignable : {exc}") from exc
+        if r.status_code >= 500 and tentative == 0:
+            attendre(2)
+            continue
+        if r.status_code >= 400:
+            raise ErreurOllama(f"Ollama a refusé l'appel (HTTP {r.status_code}) : {r.text[:200]}")
+        data = r.json()
+        try:
+            contenu = json.loads(data["message"]["content"])
+        except (KeyError, json.JSONDecodeError) as exc:
+            raise ErreurOllama(f"Réponse non conforme au schéma : {str(data)[:200]}") from exc
+        return {
+            "contenu": contenu,
+            "tokens": data.get("prompt_eval_count", 0) + data.get("eval_count", 0),
+            "duree_ms": int((time.monotonic() - debut) * 1000),
+        }
+    raise ErreurOllama("Ollama en erreur deux fois de suite")
 
 
-def classify(
-    text: str,
-    backend: str = "anthropic",
-    ollama_model: str | None = None,
-    ollama_url: str | None = None,
-) -> dict:
-    if backend == "ollama":
-        model = ollama_model or os.environ.get("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
-        url = ollama_url or os.environ.get("OLLAMA_URL", DEFAULT_OLLAMA_URL)
-        return _classify_ollama(text, model, url)
-    return _classify_anthropic(text)
+def classify(text: str, model: str | None = None, base_url: str | None = None, session=requests) -> dict:
+    model = model or os.environ.get("OLLAMA_MODEL", DEFAULT_MODEL)
+    base_url = base_url or os.environ.get("OLLAMA_URL", DEFAULT_URL)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": text}]
+    tokens = duree = 0
+    for essai in range(REDEMANDES_MAX + 1):
+        rep = _appel(messages, schema.SCHEMA, model, base_url, session)
+        tokens += rep["tokens"]
+        duree += rep["duree_ms"]
+        decision = schema.normaliser(rep["contenu"])
+        ecarts = schema.valider(decision)
+        if not ecarts:
+            return {
+                "result": decision,
+                "controles": schema.controler(decision),
+                "model": model,
+                "tokens_used": tokens,
+                "duree_ms": duree,
+                "redemandes": essai,
+            }
+        messages += [
+            {"role": "assistant", "content": json.dumps(rep["contenu"], ensure_ascii=False)},
+            {"role": "user", "content": "Ta réponse enfreint ces règles, corrige-la :\n- " + "\n- ".join(ecarts)},
+        ]
+    raise ErreurOllama("Décision invalide après redemande : " + " ; ".join(ecarts))
+
+
+def relire(text: str, decision: dict, model: str | None = None, base_url: str | None = None, session=requests) -> dict:
+    """Relecture par un second modèle (local) : accord ou désaccord, avec motif."""
+    model = model or os.environ.get("OLLAMA_MODEL", DEFAULT_MODEL)
+    base_url = base_url or os.environ.get("OLLAMA_URL", DEFAULT_URL)
+    messages = [
+        {"role": "system", "content": PROMPT_RELECTURE},
+        {"role": "user", "content": f"Document :\n{text}\n\nDécision :\n{json.dumps(decision, ensure_ascii=False)}"},
+    ]
+    rep = _appel(messages, SCHEMA_RELECTURE, model, base_url, session)
+    v = rep["contenu"]
+    if v.get("verdict") not in ("accord", "desaccord"):
+        raise ErreurOllama(f"Relecture non conforme : {v}")
+    return {"verdict": v["verdict"], "motif": str(v.get("motif", "")), "modele": model, "tokens": rep["tokens"]}
+
+
+def appliquer_relecture(controles: dict, relecture: dict | None) -> dict:
+    """Un désaccord de la relecture divise la confiance retenue par deux."""
+    c = dict(controles)
+    if relecture and relecture["verdict"] == "desaccord":
+        c["confiance"] = round(c["confiance"] / 2, 2)
+    return c

@@ -1,5 +1,6 @@
 .env
 reports/*.log
+reports/*.jsonl
 __pycache__/
 *.pyc
 *.pyo
